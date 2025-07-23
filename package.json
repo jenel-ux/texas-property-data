@@ -1,0 +1,29 @@
+{
+  "name": "texas-property-scraper",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "clear-db": "tsx src/clear-db.ts",
+    "build": "tsc",
+    "serve": "node dist/main.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@browserbasehq/stagehand": "^2.4.1",
+    "@supabase/supabase-js": "^2.52.0",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/json-schema": "^7.0.15",
+    "@types/node": "^20.14.9",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.20.3",
+    "typescript": "^5.5.2"
+  }
+}
