@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import runDallasScraper from './scrapers/dallas/assessment-scraper.js';
+import runDallasAssessmentScraper from './scrapers/dallas/assessment-scraper.js';
+import runClerkScraper from './scrapers/dallas/clerk-scraper.js';
 import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -10,13 +11,13 @@ if (!supabaseUrl || !supabaseKey) {
 }
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+// --- Helper Functions ---
 function cleanAndParseNumber(value: string | undefined | null): number | null {
   if (!value) return null;
   const cleaned = value.replace(/[^0-9.-]+/g, "");
   const number = parseFloat(cleaned);
   return isNaN(number) ? null : number;
 }
-
 function formatAsDate(dateString: string | undefined | null): string | null {
     if (!dateString) return null;
     try {
@@ -25,55 +26,34 @@ function formatAsDate(dateString: string | undefined | null): string | null {
         return null;
     }
 }
-
-// --- CORRECTED: Helper function to parse the legal description ---
 function parseLegalDescription(description: string | undefined | null) {
     if (!description) return {};
-
     const lines = description.split('\n').map(line => line.trim()).filter(line => line);
-    const result: { [key: string]: string | null } = {
-        subdivision: null,
-        block: null,
-        city_block: null,
-        lot1: null,
-        lot2: null,
-    };
+    const result: { [key: string]: string | null } = { subdivision: null, block: null, city_block: null, lot1: null, lot2: null };
+    
+    const fullDescription = lines.join(' ');
 
-    // Rule 1: Subdivision
-    if (lines.length > 0 && !lines[0].toUpperCase().includes('BLK') && !lines[0].toUpperCase().includes('BLOCK')) {
-        result.subdivision = lines.shift() || null; // Take the first line and remove it
+    const blockIndex = fullDescription.toUpperCase().indexOf('BLK');
+    if (blockIndex > 0) {
+        result.subdivision = fullDescription.substring(0, blockIndex).trim();
+    } else if (lines.length > 0 && !lines[0].toUpperCase().includes('BLK') && !lines[0].toUpperCase().includes('BLOCK')) {
+         result.subdivision = lines[0];
     }
 
-    // Rule 2 & 3: Block, City Block, and Lots from remaining lines
-    for (const line of lines) {
-        const upperLine = line.toUpperCase();
-        
-        if (upperLine.includes('BLK') || upperLine.includes('BLOCK')) {
-            let blockContent = line.replace(/BLK|BLOCK/i, '').trim();
-            // Isolate block part from lot part before splitting by '/'
-            blockContent = blockContent.split(/LT|LOT/i)[0].trim(); 
-            
-            const parts = blockContent.split('/');
-            result.block = parts[0]?.trim() || null;
-            if (parts[1]) {
-                result.city_block = parts[1].trim() || null;
-            }
-        }
-        
-        // Use a regular expression to find lot numbers after LT, LOT, LTS, or LOTS
-        const lotMatch = upperLine.match(/(?:LTS|LT|LOTS|LOT)\s*(.*)/);
-        if (lotMatch && lotMatch[1]) {
-            const lotParts = lotMatch[1].trim().split('&');
-            result.lot1 = lotParts[0]?.trim() || null;
-            if (lotParts[1]) {
-                result.lot2 = lotParts[1].trim() || null;
-            }
-        }
+    const blockMatch = fullDescription.match(/(?:BLK|BLOCK)\s*([^\s/]+)(?:\s*\/\s*(\S+))?/i);
+    if (blockMatch) {
+        result.block = blockMatch[1] || null;
+        result.city_block = blockMatch[2] || null;
+    }
+
+    const lotMatch = fullDescription.match(/(?:LTS|LT|LOTS|LOT)\s*(\d+)(?:\s*&\s*(\d+))?/i);
+    if (lotMatch) {
+        result.lot1 = lotMatch[1] || null;
+        result.lot2 = lotMatch[2] || null;
     }
 
     return result;
 }
-
 
 const propertiesToScrape = [
   { addressNumber: '9920', streetName: 'Gulf Palm' },
@@ -82,19 +62,72 @@ const propertiesToScrape = [
 async function runAllScrapers() {
   for (const property of propertiesToScrape) {
     try {
-      console.log(`--- Starting scraper for ${property.addressNumber} ${property.streetName} ---`);
-      const result = await runDallasScraper(property.addressNumber, property.streetName);
+      console.log(`--- Starting Assessment scraper for ${property.addressNumber} ${property.streetName} ---`);
+      const assessmentResult = await runDallasAssessmentScraper(property.addressNumber, property.streetName);
 
-      if (result.success && result.data) {
-        console.log('Scraping successful. Storing data in Supabase...');
-        const { error } = await saveDataToSupabase(result.data);
-        if (error) {
-          console.error(`Error saving to Supabase:`, error.message);
-        } else {
-          console.log(`Successfully saved data.`);
+      if (assessmentResult.success && assessmentResult.data) {
+        console.log('Assessment scraping successful. Storing data...');
+        const parsedLegal = parseLegalDescription(assessmentResult.data.legalDescription);
+        
+        const { error: assessmentError } = await saveDataToSupabase(assessmentResult.data, parsedLegal);
+        if (assessmentError) {
+          console.error(`Error saving assessment data:`, assessmentError.message);
+          continue; 
         }
+        console.log(`Successfully saved assessment data.`);
+
+        if (parsedLegal.subdivision && parsedLegal.block && parsedLegal.lot1) {
+            console.log(`--- Starting Clerk scraper for ${property.addressNumber} ${property.streetName} ---`);
+            const clerkResult = await runClerkScraper({
+                lot: parsedLegal.lot1,
+                block: parsedLegal.block,
+                city_block: parsedLegal.city_block,
+                subdivision: parsedLegal.subdivision,
+            });
+
+            if (clerkResult.success && clerkResult.data) {
+                if (clerkResult.data.searchUrl) {
+                    await supabase
+                      .from('properties')
+                      .update({ clerk_search_url: clerkResult.data.searchUrl })
+                      .eq('account_number', assessmentResult.data.accountNumber);
+                }
+
+                if (clerkResult.data.documents && clerkResult.data.documents.length > 0) {
+                    // --- NEW: Filter the documents before saving ---
+                    const filteredDocuments = clerkResult.data.documents.filter(doc => {
+                        const docLegal = doc.legal_description?.toUpperCase() || '';
+                        // Check if the document's legal description contains all our key parts
+                        return docLegal.includes(parsedLegal.subdivision!.toUpperCase()) &&
+                               docLegal.includes(`LOT: ${parsedLegal.lot1}`) &&
+                               docLegal.includes(`BLOCK: ${parsedLegal.block}`);
+                    });
+
+                    console.log(`Found ${clerkResult.data.documents.length} total documents, filtered down to ${filteredDocuments.length} relevant documents.`);
+
+                    if (filteredDocuments.length > 0) {
+                        console.log("Storing filtered documents...");
+                        const { error: clerkError } = await saveClerkDataToSupabase(assessmentResult.data.accountNumber, filteredDocuments);
+                        if (clerkError) {
+                            console.error("Error saving clerk data:", clerkError.message);
+                        } else {
+                            console.log("Successfully saved clerk documents.");
+                        }
+                    } else {
+                        console.log("No relevant documents found after filtering.");
+                    }
+                } else {
+                    console.log("Clerk scraper found no documents to save.");
+                }
+            } else {
+                console.log("Clerk scraper failed:", clerkResult.error);
+            }
+        } else {
+            console.log("Skipping clerk scraper: Missing required legal description data.");
+        }
+
       } else {
-        console.log(`Scraping failed:`, result.error);
+        console.log(`Assessment scraping failed:`, assessmentResult.error);
       }
     } catch (error) {
       console.error(`A critical error occurred while scraping:`, error);
@@ -103,12 +136,9 @@ async function runAllScrapers() {
   }
 }
 
-async function saveDataToSupabase(scrapedData: any) {
-    const { accountNumber, address, propertyValue, propertyDetails, currentOwners, ownershipHistory, marketValueHistory, exemptions, int_number, deed_xfer_date, legalDescription, cad_url } = scrapedData;
+async function saveDataToSupabase(scrapedData: any, parsedLegal: any) {
+    const { accountNumber, address, propertyValue, propertyDetails, currentOwners, ownershipHistory, marketValueHistory, exemptions, int_number, deed_xfer_date, cad_url } = scrapedData;
 
-    const parsedLegal = parseLegalDescription(legalDescription);
-
-    // Step 1: Upsert property details with new fields
     const { error: propertyError } = await supabase.from('properties').upsert({
         account_number: accountNumber,
         address: address,
@@ -124,44 +154,19 @@ async function saveDataToSupabase(scrapedData: any) {
         lot1: parsedLegal.lot1,
         lot2: parsedLegal.lot2,
     }, { onConflict: 'account_number' });
-
     if (propertyError) return { error: propertyError };
 
-    // ... (rest of the function for owners, history, and exemptions remains the same)
     const allOwners = new Map<string, { address?: string }>();
-    if (currentOwners) {
-        currentOwners.forEach((owner: any) => {
-            if (owner.name) allOwners.set(owner.name.trim(), { address: owner.address?.trim() });
-        });
-    }
-    if (ownershipHistory) {
-        ownershipHistory.forEach((rec: any) => {
-            const parts = rec.ownerNameAndAddress?.split('\n') || [];
-            const name = parts[0]?.trim();
-            if (name && !allOwners.has(name)) {
-                const address = parts.slice(1).join(' ').trim();
-                allOwners.set(name, { address });
-            }
-        });
-    }
-
-    if (allOwners.size === 0) {
-        console.log("No owners found to process.");
-        return { error: null };
-    }
-
-    const ownerRecords = Array.from(allOwners.entries()).map(([name, data]) => ({
-        owner_name: name,
-        owner_address: data.address,
-    }));
-    const { data: upsertedOwners, error: ownerError } = await supabase
-        .from('owners')
-        .upsert(ownerRecords, { onConflict: 'owner_name' })
-        .select('id, owner_name');
+    if (currentOwners) { currentOwners.forEach((owner: any) => { if (owner.name) allOwners.set(owner.name.trim(), { address: owner.address?.trim() }); }); }
+    if (ownershipHistory) { ownershipHistory.forEach((rec: any) => { const parts = rec.ownerNameAndAddress?.split('\n') || []; const name = parts[0]?.trim(); if (name && !allOwners.has(name)) { const address = parts.slice(1).join(' ').trim(); allOwners.set(name, { address }); } }); }
+    if (allOwners.size === 0) { console.log("No owners found."); return { error: null }; }
+    
+    const ownerRecords = Array.from(allOwners.entries()).map(([name, data]) => ({ owner_name: name, owner_address: data.address }));
+    const { data: upsertedOwners, error: ownerError } = await supabase.from('owners').upsert(ownerRecords, { onConflict: 'owner_name' }).select('id, owner_name');
     if (ownerError) return { error: ownerError };
     
     const ownerNameToIdMap = new Map(upsertedOwners!.map(o => [o.owner_name, o.id]));
-
+    
     await supabase.from('ownership_history').delete().eq('property_account_number', accountNumber);
     await supabase.from('value_history').delete().eq('property_account_number', accountNumber);
     await supabase.from('exemptions').delete().eq('property_account_number', accountNumber);
@@ -301,9 +306,31 @@ async function saveDataToSupabase(scrapedData: any) {
             if (error) return { error };
         }
     }
-
+    
     return { error: null };
 }
+
+async function saveClerkDataToSupabase(accountNumber: string, documents: any[]) {
+    if (!accountNumber || documents.length === 0) {
+        return { error: null };
+    }
+
+    await supabase.from('property_documents').delete().eq('property_account_number', accountNumber);
+
+    const documentRecords = documents.map(doc => ({
+        property_account_number: accountNumber,
+        document_type: doc.document_type,
+        grantor: doc.grantor,
+        grantee: doc.grantee,
+        filing_date: formatAsDate(doc.filing_date),
+        instrument_number: doc.instrument_number,
+        book_and_page: doc.book_and_page,
+    }));
+
+    const { error } = await supabase.from('property_documents').insert(documentRecords);
+    return { error };
+}
+
 
 runAllScrapers()
   .then(() => console.log('All scraping tasks have been completed.'))

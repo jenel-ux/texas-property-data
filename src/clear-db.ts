@@ -13,7 +13,8 @@ async function clearDatabase() {
   console.log('--- Clearing existing data from database ---');
   
   // Important: Delete from tables with foreign keys first to avoid errors.
-  const tablesToDelete = ['ownership_history', 'value_history', 'exemptions'];
+  // Added 'property_documents' to this list.
+  const tablesToDelete = ['ownership_history', 'value_history', 'exemptions', 'property_documents'];
 
   for (const table of tablesToDelete) {
     // Deletes all rows in the table
