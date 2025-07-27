@@ -1,83 +1,121 @@
+// src/scrapers/dallas/clerk-scraper.ts
+
 import { Stagehand, type ConstructorParams } from '@browserbasehq/stagehand';
 import { z } from 'zod';
+import { getTextFromImages, summarizeDocumentText } from '../../lib/ai-image-processor.js';
 
 const stagehandConfig = (): ConstructorParams => {
-  const proxyUrl = `http://${process.env.OXYLABS_USERNAME}:${process.env.OXYLABS_PASSWORD}@pr.oxylabs.io:7777`;
-  return {
-    env: 'BROWSERBASE',
-    verbose: 1,
-    modelName: 'google/gemini-2.5-flash-preview-05-20',
-    modelClientOptions: {
-      apiKey: process.env.GOOGLE_API_KEY,
-    },
-    proxy: proxyUrl,
-  } as any;
+    const proxyUrl = `http://${process.env.OXYLABS_USERNAME}:${process.env.OXYLABS_PASSWORD}@pr.oxylabs.io:7777`;
+    return {
+        env: 'BROWSERBASE',
+        verbose: 1,
+        modelName: 'google/gemini-2.5-flash-preview-05-20',
+        modelClientOptions: { apiKey: process.env.GOOGLE_API_KEY },
+        proxy: proxyUrl,
+    } as any;
 };
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 interface ClerkScraperInput {
-    lot: string | null;
-    block: string | null;
+    lot: string;
+    block: string;
+    subdivision: string;
     city_block: string | null;
-    subdivision: string | null;
 }
 
-async function runClerkScraper(input: ClerkScraperInput) {
-  let stagehand: Stagehand | null = null;
-  try {
-    console.log('Initializing Clerk Scraper...');
-    stagehand = new Stagehand(stagehandConfig());
-    await stagehand.init();
-    console.log('Clerk Scraper initialized successfully.');
+async function runClerkScraper(targetLegal: ClerkScraperInput) {
+    let stagehand: Stagehand | null = null;
+    try {
+        stagehand = new Stagehand(stagehandConfig());
+        await stagehand.init();
+        const page = stagehand.page;
 
-    const page = stagehand.page;
-    if (!page) {
-      throw new Error('Failed to get page instance from Stagehand');
+        const today = new Date();
+        const endDate = `${today.getFullYear()}${(today.getMonth() + 1).toString().padStart(2, '0')}${today.getDate().toString().padStart(2, '0')}`;
+        const searchUrl = `https://dallas.tx.publicsearch.us/results?department=RP&searchType=advancedSearch&recordedDateRange=20000101%2C${endDate}&lot=${encodeURIComponent(targetLegal.lot)}&block=${encodeURIComponent(targetLegal.block)}&block2=${encodeURIComponent(targetLegal.city_block || '')}&legalDescription=${encodeURIComponent(targetLegal.subdivision)}`;
+        
+        await page.goto(searchUrl, { waitUntil: 'domcontentloaded' });
+        await sleep(Math.random() * 2000 + 3000); 
+        await page.waitForSelector('table tbody tr', { timeout: 15000 });
+
+        const { documents } = await page.extract({
+            instruction: "From the search results table, extract an array of all documents shown.",
+            schema: z.object({
+                documents: z.array(z.object({
+                    document_type: z.string().optional(),
+                    grantor: z.string().optional(),
+                    grantee: z.string().optional(),
+                    filing_date: z.string().optional(),
+                    instrument_number: z.string().optional(),
+                    book_and_page: z.string().optional(),
+                    legal_description: z.string().optional(),
+                }))
+            })
+        });
+
+        const filteredDocuments = documents.filter(doc => {
+            const docLegal = doc.legal_description?.toUpperCase() || '';
+            const hasLot = new RegExp(`\\b(LOT|LT):?\\s*${targetLegal.lot}\\b`).test(docLegal);
+            const hasBlock = new RegExp(`\\b(BLOCK|BLK):?\\s*${targetLegal.block}\\b`).test(docLegal);
+            return hasLot && hasBlock;
+        });
+
+        console.log(`Found ${documents.length} total documents, filtered down to ${filteredDocuments.length} relevant documents.`);
+        if (filteredDocuments.length === 0) return { success: true, data: [] };
+
+        const processedDocs = [];
+        for (const [index, doc] of filteredDocuments.entries()) {
+            let summary = 'Summary could not be generated.';
+            try {
+                console.log(`Processing document ${index + 1}/${filteredDocuments.length}: ${doc.instrument_number}`);
+                const originalIndex = documents.findIndex((d: any) => d.instrument_number === doc.instrument_number);
+                await page.locator(`table tbody tr:nth-child(${originalIndex + 1})`).click();
+                
+                const imageSelector = 'svg image';
+                await page.waitForSelector(imageSelector, { timeout: 30000 });
+
+                const { pageCount } = await page.extract({
+                    instruction: "Find the page count text on the page (e.g., '1 of 6') and return only the total number of pages as an integer.",
+                    schema: z.object({
+                        pageCount: z.number().default(1)
+                    })
+                });
+                
+                const images = [];
+                for (let i = 1; i <= pageCount; i++) {
+                    const imgBuffer = await page.screenshot({ selector: imageSelector });
+                    images.push(imgBuffer.toString('base64'));
+                    
+                    if (i < pageCount) {
+                        // ======================================================================
+                        // == THE FIX: Use the correct selector based on your screenshot.      ==
+                        // ======================================================================
+                        const nextPageButton = page.locator('button:has(img[alt="Go To Next Page"])');
+                        await nextPageButton.click();
+                        await sleep(1000); 
+                    }
+                }
+                
+                const extractedText = await getTextFromImages(images);
+                summary = await summarizeDocumentText(extractedText);
+            } catch (e) {
+                console.error(`Failed to process images/summary for ${doc.instrument_number}:`, (e as Error).message);
+            } finally {
+                processedDocs.push({ ...doc, summary });
+                if (index < filteredDocuments.length - 1) {
+                    await page.goBack({ waitUntil: 'domcontentloaded' });
+                    await sleep(Math.random() * 1000 + 2000);
+                }
+            }
+        }
+        return { success: true, data: processedDocs };
+
+    } catch (error) {
+        return { success: false, error: (error as Error).message };
+    } finally {
+        if (stagehand) await stagehand.close();
     }
-
-    // --- Using the reliable URL construction method ---
-    const today = new Date();
-    const endDate = `${today.getFullYear()}${(today.getMonth() + 1).toString().padStart(2, '0')}${today.getDate().toString().padStart(2, '0')}`;
-    const startDate = '20000101';
-
-    const subdivision = encodeURIComponent(input.subdivision || '');
-    const lot = encodeURIComponent(input.lot || '');
-    const block = encodeURIComponent(input.block || '');
-    const cityBlock = encodeURIComponent(input.city_block || '');
-
-    const searchUrl = `https://dallas.tx.publicsearch.us/results?department=RP&searchType=advancedSearch&recordedDateRange=${startDate}%2C${endDate}&lot=${lot}&block=${block}&block2=${cityBlock}&legalDescription=${subdivision}`;
-    
-    console.log(`Navigating directly to search results: ${searchUrl}`);
-    await page.goto(searchUrl);
-    
-    await page.waitForSelector('xpath=/html[1]/body[1]/div[2]/article[1]/div[1]/div[1]/div[2]/div[1]/table[1]/tbody[1]/tr', { timeout: 15000 });
-
-    const documents = await page.extract({
-        instruction: "From the search results table, extract a list of all documents. For each document, get the Document Type, Grantor, Grantee, Filing Date, Instrument #, Book/Page, and the full Legal Description text.",
-        schema: z.object({
-            documents: z.array(z.object({
-                document_type: z.string().optional(),
-                grantor: z.string().optional(),
-                grantee: z.string().optional(),
-                filing_date: z.string().optional(),
-                instrument_number: z.string().optional(),
-                book_and_page: z.string().optional(),
-                legal_description: z.string().optional(), // Added field for filtering
-            })).optional()
-        })
-    });
-
-    console.log('Clerk workflow completed successfully.');
-    return { success: true, data: { ...documents, searchUrl } };
-
-  } catch (error) {
-    console.error('Clerk workflow failed:', error);
-    return { success: false, error };
-  } finally {
-    if (stagehand) {
-      console.log('Closing Stagehand connection.');
-      await stagehand.close();
-    }
-  }
 }
 
 export default runClerkScraper;
