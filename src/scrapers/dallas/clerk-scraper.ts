@@ -67,6 +67,8 @@ async function runClerkScraper(targetLegal: ClerkScraperInput) {
         const processedDocs = [];
         for (const [index, doc] of filteredDocuments.entries()) {
             let summary = 'Summary could not be generated.';
+            let documentUrl = null; // Initialize documentUrl
+
             try {
                 console.log(`Processing document ${index + 1}/${filteredDocuments.length}: ${doc.instrument_number}`);
                 const originalIndex = documents.findIndex((d: any) => d.instrument_number === doc.instrument_number);
@@ -74,6 +76,12 @@ async function runClerkScraper(targetLegal: ClerkScraperInput) {
                 
                 const imageSelector = 'svg image';
                 await page.waitForSelector(imageSelector, { timeout: 30000 });
+
+                // ======================================================================
+                // == THE CHANGE: Capture the URL of the document viewer page.       ==
+                // ======================================================================
+                documentUrl = page.url();
+                console.log(`  - Captured URL: ${documentUrl}`);
 
                 const { pageCount } = await page.extract({
                     instruction: "Find the page count text on the page (e.g., '1 of 6') and return only the total number of pages as an integer.",
@@ -88,9 +96,6 @@ async function runClerkScraper(targetLegal: ClerkScraperInput) {
                     images.push(imgBuffer.toString('base64'));
                     
                     if (i < pageCount) {
-                        // ======================================================================
-                        // == THE FIX: Use the correct selector based on your screenshot.      ==
-                        // ======================================================================
                         const nextPageButton = page.locator('button:has(img[alt="Go To Next Page"])');
                         await nextPageButton.click();
                         await sleep(1000); 
@@ -102,7 +107,10 @@ async function runClerkScraper(targetLegal: ClerkScraperInput) {
             } catch (e) {
                 console.error(`Failed to process images/summary for ${doc.instrument_number}:`, (e as Error).message);
             } finally {
-                processedDocs.push({ ...doc, summary });
+                // ======================================================================
+                // == THE CHANGE: Add the captured URL to the final object.          ==
+                // ======================================================================
+                processedDocs.push({ ...doc, summary, documentUrl });
                 if (index < filteredDocuments.length - 1) {
                     await page.goBack({ waitUntil: 'domcontentloaded' });
                     await sleep(Math.random() * 1000 + 2000);

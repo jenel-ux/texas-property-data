@@ -78,9 +78,6 @@ async function runAllScrapers() {
             }
 
             console.log('Assessment scraping successful.');
-            // ======================================================================
-            // == THE FIX: Use the parseLegalDescription function on the correct data.
-            // ======================================================================
             const parsedLegal = parseLegalDescription(assessmentResult.data.legalDescription);
             
             const { error: saveError } = await saveDataToSupabase(assessmentResult.data, parsedLegal);
@@ -137,7 +134,10 @@ async function saveDataToSupabase(scrapedData: any, parsedLegal: any) {
     const allOwners = new Map<string, { address?: string }>();
     currentOwners?.forEach((owner: any) => { if (owner.name) allOwners.set(owner.name.trim(), { address: owner.address?.trim() }); });
     ownershipHistory?.forEach((rec: any) => { const name = (rec.ownerNameAndAddress?.split('\n')[0] || '').trim(); if (name && !allOwners.has(name)) allOwners.set(name, { address: rec.ownerNameAndAddress?.split('\n').slice(1).join(' ').trim() }); });
-    if (allOwners.size === 0) return { error: { message: "No owners found to process."} };
+    if (allOwners.size === 0) { 
+        console.log("No owners found in scraped data.");
+        return { error: null };
+    }
     
     const ownerRecords = Array.from(allOwners.keys()).map(name => ({ owner_name: name }));
     const { data: upsertedOwners, error: ownerError } = await supabase.from('owners').upsert(ownerRecords, { onConflict: 'owner_name' }).select('id, owner_name');
@@ -230,12 +230,15 @@ async function saveClerkDataToSupabase(accountNumber: string, documents: any[]) 
         instrument_number: doc.instrument_number,
         book_and_page: doc.book_and_page,
         summary: doc.summary,
+        document_url: doc.documentUrl,
     }));
     const { error } = await supabase.from('property_documents').insert(documentRecords);
     if (error) console.error("Error saving clerk data:", error);
-    else console.log("Successfully saved clerk documents with summaries.");
+    else console.log("Successfully saved clerk documents with summaries and URLs.");
 }
 
 runAllScrapers()
     .then(() => console.log('All scraping tasks have been completed.'))
-    .catch((error) => console.error('An unhandled error occurred:', error));
+    .catch((error) => console.error('An unhandled error occurred in the main execution:', error));
+
+// Make sure this final line and everything above it is copied.
