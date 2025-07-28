@@ -54,7 +54,7 @@ async function runClerkScraper(targetLegal: ClerkScraperInput) {
             })
         });
 
-        const filteredDocuments = documents.filter(doc => {
+        const filteredDocuments = documents.filter((doc: any) => {
             const docLegal = doc.legal_description?.toUpperCase() || '';
             const hasLot = new RegExp(`\\b(LOT|LT):?\\s*${targetLegal.lot}\\b`).test(docLegal);
             const hasBlock = new RegExp(`\\b(BLOCK|BLK):?\\s*${targetLegal.block}\\b`).test(docLegal);
@@ -67,8 +67,7 @@ async function runClerkScraper(targetLegal: ClerkScraperInput) {
         const processedDocs = [];
         for (const [index, doc] of filteredDocuments.entries()) {
             let summary = 'Summary could not be generated.';
-            let documentUrl = null; // Initialize documentUrl
-
+            let documentUrl: string | null = null;
             try {
                 console.log(`Processing document ${index + 1}/${filteredDocuments.length}: ${doc.instrument_number}`);
                 const originalIndex = documents.findIndex((d: any) => d.instrument_number === doc.instrument_number);
@@ -76,12 +75,7 @@ async function runClerkScraper(targetLegal: ClerkScraperInput) {
                 
                 const imageSelector = 'svg image';
                 await page.waitForSelector(imageSelector, { timeout: 30000 });
-
-                // ======================================================================
-                // == THE CHANGE: Capture the URL of the document viewer page.       ==
-                // ======================================================================
                 documentUrl = page.url();
-                console.log(`  - Captured URL: ${documentUrl}`);
 
                 const { pageCount } = await page.extract({
                     instruction: "Find the page count text on the page (e.g., '1 of 6') and return only the total number of pages as an integer.",
@@ -92,7 +86,10 @@ async function runClerkScraper(targetLegal: ClerkScraperInput) {
                 
                 const images = [];
                 for (let i = 1; i <= pageCount; i++) {
-                    const imgBuffer = await page.screenshot({ selector: imageSelector });
+                    // ======================================================================
+                    // == THE FIX: Use locator(...).screenshot() to capture a specific element. ==
+                    // ======================================================================
+                    const imgBuffer = await page.locator(imageSelector).screenshot();
                     images.push(imgBuffer.toString('base64'));
                     
                     if (i < pageCount) {
@@ -107,9 +104,6 @@ async function runClerkScraper(targetLegal: ClerkScraperInput) {
             } catch (e) {
                 console.error(`Failed to process images/summary for ${doc.instrument_number}:`, (e as Error).message);
             } finally {
-                // ======================================================================
-                // == THE CHANGE: Add the captured URL to the final object.          ==
-                // ======================================================================
                 processedDocs.push({ ...doc, summary, documentUrl });
                 if (index < filteredDocuments.length - 1) {
                     await page.goBack({ waitUntil: 'domcontentloaded' });

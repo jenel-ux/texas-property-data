@@ -13,7 +13,11 @@ export async function getTextFromImages(images: string[]): Promise<string> {
 
     console.log(`  - Extracting text from ${images.length} image pages in a single batch...`);
 
-    const parts = [
+    // ======================================================================
+    // == THE FIX: Explicitly type the 'parts' array to allow different    ==
+    // == object shapes, resolving the TypeScript error.                   ==
+    // ======================================================================
+    const parts: ({ text: string; } | { inlineData: { mimeType: string; data: string; }; })[] = [
         { text: "Extract all text from these document images, in order. Concatenate the text from all pages into a single response." },
     ];
 
@@ -31,10 +35,6 @@ export async function getTextFromImages(images: string[]): Promise<string> {
     };
 
     const apiKey = process.env.GOOGLE_API_KEY || "";
-    // ======================================================================
-    // == THE FIX: Switched from the deprecated 'gemini-pro-vision' to     ==
-    // == the new 'gemini-1.5-flash-latest' model.                         ==
-    // ======================================================================
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
 
     try {
@@ -103,6 +103,6 @@ export async function summarizeDocumentText(text: string): Promise<string> {
         }
     } catch (error) {
         console.error("Error summarizing text:", error);
+        throw error;
     }
-    return "Failed to generate summary due to a critical error.";
 }
