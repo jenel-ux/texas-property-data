@@ -16,6 +16,7 @@
   "dependencies": {
     "@browserbasehq/stagehand": "^2.4.1",
     "@supabase/supabase-js": "^2.52.0",
+    "airtable": "^0.12.2",
     "dotenv": "^16.4.5",
     "zod": "^3.23.8"
   },

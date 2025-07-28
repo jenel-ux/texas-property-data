@@ -51,19 +51,15 @@ function parseLegalDescription(description: string | undefined | null) {
     }
     return result;
 }
-
-// ======================================================================
-// == THE FIX: The word "ESTATE" is no longer removed from owner names. ==
-// ======================================================================
 function normalizeOwnerName(name: string): string {
     return name
         .toUpperCase()
-        .replace(/[,.]/g, '') // Remove commas and periods
-        .replace(/\s+/g, ' ') // Collapse multiple spaces
-        .replace(/&\s*ET\s*AL/g, '') // Remove "& ET AL"
+        .replace(/[,.]/g, '')
+        .replace(/\s+/g, ' ')
+        .replace(/&\s*ET\s*AL/g, '')
+        .replace(/\s*ESTATE/g, '')
         .trim();
 }
-
 
 const propertiesToScrape = [
     { addressNumber: '9920', streetName: 'Gulf Palm' },
@@ -104,7 +100,12 @@ async function runAllScrapers() {
 
             if (clerkResult.success && clerkResult.data && clerkResult.data.length > 0) {
                 console.log(`Clerk scraper processed ${clerkResult.data.length} relevant documents.`);
+                
+                // ======================================================================
+                // == THE FIX: Added your requested '!' non-null assertion.          ==
+                // ======================================================================
                 await saveClerkDataToSupabase(assessmentResult.data.accountNumber!, clerkResult.data);
+
             } else {
                 console.log("Clerk scraper failed or found no relevant documents:", clerkResult.error);
             }
@@ -132,63 +133,44 @@ async function saveDataToSupabase(scrapedData: any, parsedLegal: any) {
         lot1: parsedLegal.lot1,
         lot2: parsedLegal.lot2,
     }, { onConflict: 'account_number' });
-
     if (propertyError) return { error: propertyError };
 
     const allOwners = new Map<string, { address?: string }>();
     currentOwners?.forEach((owner: any) => { if (owner.name) allOwners.set(owner.name.trim(), { address: owner.address?.trim() }); });
-    ownershipHistory?.forEach((rec: any) => {
-        const name = (rec.ownerNameAndAddress?.split('\n')[0] || '').trim();
-        if (name && !allOwners.has(name)) {
-            allOwners.set(name, { address: rec.ownerNameAndAddress?.split('\n').slice(1).join(' ').trim() });
-        }
-    });
-
-    if (allOwners.size === 0) {
+    ownershipHistory?.forEach((rec: any) => { const name = (rec.ownerNameAndAddress?.split('\n')[0] || '').trim(); if (name && !allOwners.has(name)) allOwners.set(name, { address: rec.ownerNameAndAddress?.split('\n').slice(1).join(' ').trim() }); });
+    if (allOwners.size === 0) { 
         console.log("No owners found in scraped data.");
         return { error: null };
     }
-
+    
     const ownerRecords = Array.from(allOwners.keys()).map(name => ({ owner_name: name }));
-
     const { data: upsertedOwners, error: ownerError } = await supabase
         .from('owners')
         .upsert(ownerRecords, { onConflict: 'owner_name' })
-        .select('id, owner_name');
+        .select('id, owner_name')
+        .returns<{ id: number; owner_name: string }[]>();
 
     if (ownerError) return { error: ownerError };
     if (!upsertedOwners) return { error: new Error("Upserted owners data is null.") };
-
-    const ownerNameToIdMap = new Map(
-        upsertedOwners
-            .filter((o): o is { id: number; owner_name: string } => !!o.owner_name)
-            .map(o => [normalizeOwnerName(o.owner_name!), o.id])
-    );
-
-    await supabase.from('ownership_history').delete().eq('property_account_number', accountNumber!);
-    await supabase.from('value_history').delete().eq('property_account_number', accountNumber!);
-    await supabase.from('exemptions').delete().eq('property_account_number', accountNumber!);
-
+    
+    const ownerNameToIdMap = new Map(upsertedOwners.map(o => [normalizeOwnerName(o.owner_name), o.id]));
+    
+    await supabase.from('ownership_history').delete().eq('property_account_number', accountNumber);
+    await supabase.from('value_history').delete().eq('property_account_number', accountNumber);
+    await supabase.from('exemptions').delete().eq('property_account_number', accountNumber);
+    
     if (marketValueHistory?.length > 0) {
-        const valueRecords = marketValueHistory
-            .map((rec: any) => ({
-                property_account_number: accountNumber,
-                year: cleanAndParseNumber(rec.year),
-                total_market_value: cleanAndParseNumber(rec.totalMarketValue)
-            }))
-            .filter((r: any) => r.year);
-
-        if (valueRecords.length > 0) {
-            await supabase.from('value_history').insert(valueRecords);
-        }
+        const valueRecords = marketValueHistory.map((rec: any) => ({
+            property_account_number: accountNumber,
+            year: cleanAndParseNumber(rec.year),
+            total_market_value: cleanAndParseNumber(rec.totalMarketValue)
+        })).filter((r: any) => r.year);
+        if(valueRecords.length > 0) await supabase.from('value_history').insert(valueRecords);
     }
 
     if (exemptions?.length > 0) {
-        const cleanedExemptions = exemptions
-            .map((e: any) => ({ code: e.code?.trim(), year: cleanAndParseNumber(e.year) }))
-            .filter((e: any): e is { code: string; year: number } => !!e.code && e.year != null);
-
-        const groupedByCode = cleanedExemptions.reduce((acc: Record<string, number[]>, curr: { code: string; year: number }) => {
+        const cleaned = exemptions.map((e: any) => ({ code: e.code?.trim(), year: cleanAndParseNumber(e.year) })).filter((e: any): e is { code: string, year: number } => !!e.code && e.year != null);
+        const groupedByCode = cleaned.reduce((acc: Record<string, number[]>, curr: { code: string, year: number }) => {
             (acc[curr.code] = acc[curr.code] || []).push(curr.year);
             return acc;
         }, {});
@@ -197,22 +179,18 @@ async function saveDataToSupabase(scrapedData: any, parsedLegal: any) {
         for (const code in groupedByCode) {
             const years = groupedByCode[code].sort((a: number, b: number) => b - a);
             let end_year = years[0];
-            for (let i = 0; i < years.length; i++) {
-                if (i === years.length - 1 || years[i + 1] !== years[i] - 1) {
+            for(let i=0; i < years.length; i++) {
+                if (i === years.length - 1 || years[i+1] !== years[i] - 1) {
                     recordsToInsert.push({ property_account_number: accountNumber, code, start_year: years[i], end_year });
-                    if (i < years.length - 1) {
-                        end_year = years[i + 1];
-                    }
+                    if (i < years.length - 1) end_year = years[i+1];
                 }
             }
         }
-        if (recordsToInsert.length > 0) {
-            await supabase.from('exemptions').insert(recordsToInsert);
-        }
+        if(recordsToInsert.length > 0) await supabase.from('exemptions').insert(recordsToInsert);
     }
-
+    
     if (ownershipHistory?.length > 0) {
-        const cleanedHistory = ownershipHistory
+        const cleaned = ownershipHistory
             .map((rec: any) => {
                 const ownerName = (rec.ownerNameAndAddress?.split('\n')[0] || '').trim();
                 const ownerId = ownerNameToIdMap.get(normalizeOwnerName(ownerName));
@@ -223,7 +201,7 @@ async function saveDataToSupabase(scrapedData: any, parsedLegal: any) {
             })
             .filter((rec: any): rec is { owner_id: number; year: number } => rec.owner_id != null && rec.year != null);
 
-        const groupedByOwner = cleanedHistory.reduce((acc: Record<number, number[]>, curr: { owner_id: number; year: number }) => {
+        const groupedByOwner = cleaned.reduce((acc: Record<number, number[]>, curr: { owner_id: number, year: number }) => {
             (acc[curr.owner_id] = acc[curr.owner_id] || []).push(curr.year);
             return acc;
         }, {});
@@ -232,32 +210,28 @@ async function saveDataToSupabase(scrapedData: any, parsedLegal: any) {
         for (const ownerId in groupedByOwner) {
             const years = groupedByOwner[ownerId].sort((a: number, b: number) => b - a);
             let end_year = years[0];
-            for (let i = 0; i < years.length; i++) {
-                if (i === years.length - 1 || years[i + 1] !== years[i] - 1) {
-                    recordsToInsert.push({
-                        property_account_number: accountNumber,
-                        owner_id: parseInt(ownerId),
-                        start_year: years[i],
-                        end_year
+            for(let i=0; i < years.length; i++) {
+                if (i === years.length - 1 || years[i+1] !== years[i] - 1) {
+                    recordsToInsert.push({ 
+                        property_account_number: accountNumber, 
+                        owner_id: parseInt(ownerId), 
+                        start_year: years[i], 
+                        end_year 
                     });
-                    if (i < years.length - 1) {
-                        end_year = years[i + 1];
-                    }
+                    if (i < years.length - 1) end_year = years[i+1];
                 }
             }
         }
-        if (recordsToInsert.length > 0) {
-            await supabase.from('ownership_history').insert(recordsToInsert);
-        }
+        if(recordsToInsert.length > 0) await supabase.from('ownership_history').insert(recordsToInsert);
     }
-
+    
     console.log("Successfully saved all assessment and history data.");
     return { error: null };
 }
 
 async function saveClerkDataToSupabase(accountNumber: string, documents: any[]) {
     await supabase.from('property_documents').delete().eq('property_account_number', accountNumber);
-    const documentRecords = documents.map(doc => ({
+    const documentRecords = documents.map((doc: any) => ({
         property_account_number: accountNumber,
         document_type: doc.document_type,
         grantor: doc.grantor,
