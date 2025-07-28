@@ -4,7 +4,6 @@ import 'dotenv/config';
 import runDallasAssessmentScraper from './scrapers/dallas/assessment-scraper.js';
 import runClerkScraper from './scrapers/dallas/clerk-scraper.js';
 import { createClient } from '@supabase/supabase-js';
-import { getTextFromImages, summarizeDocumentText } from './lib/ai-image-processor.js';
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
@@ -52,15 +51,19 @@ function parseLegalDescription(description: string | undefined | null) {
     }
     return result;
 }
+
+// ======================================================================
+// == THE FIX: The word "ESTATE" is no longer removed from owner names. ==
+// ======================================================================
 function normalizeOwnerName(name: string): string {
     return name
         .toUpperCase()
-        .replace(/[,.]/g, '')
-        .replace(/\s+/g, ' ')
-        .replace(/&\s*ET\s*AL/g, '')
-        .replace(/\s*ESTATE/g, '')
+        .replace(/[,.]/g, '') // Remove commas and periods
+        .replace(/\s+/g, ' ') // Collapse multiple spaces
+        .replace(/&\s*ET\s*AL/g, '') // Remove "& ET AL"
         .trim();
 }
+
 
 const propertiesToScrape = [
     { addressNumber: '9920', streetName: 'Gulf Palm' },
@@ -240,5 +243,3 @@ async function saveClerkDataToSupabase(accountNumber: string, documents: any[]) 
 runAllScrapers()
     .then(() => console.log('All scraping tasks have been completed.'))
     .catch((error) => console.error('An unhandled error occurred in the main execution:', error));
-
-// Make sure this final line and everything above it is copied.
