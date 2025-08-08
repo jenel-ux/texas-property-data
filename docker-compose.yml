@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  scraper:
+    build: .
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped

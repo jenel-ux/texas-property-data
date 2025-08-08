@@ -1,0 +1,15 @@
+[Unit]
+Description=Texas Property Scraper
+After=network.target
+
+[Service]
+Type=oneshot
+User=jenel-baton
+WorkingDirectory=/Users/jenel-baton/Desktop/texastax/texas-property-data
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm start
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

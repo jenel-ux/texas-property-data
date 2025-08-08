@@ -63,6 +63,9 @@ function normalizeOwnerName(name: string): string {
 
 const propertiesToScrape = [
     { addressNumber: '9920', streetName: 'Gulf Palm' },
+    // Add more properties here:
+    // { addressNumber: '1234', streetName: 'Main Street' },
+    // { addressNumber: '5678', streetName: 'Oak Avenue' },
 ];
 
 async function runAllScrapers() {
@@ -77,7 +80,9 @@ async function runAllScrapers() {
             }
 
             console.log('Assessment scraping successful.');
+            console.log('Raw legal description:', assessmentResult.data.legalDescription);
             const parsedLegal = parseLegalDescription(assessmentResult.data.legalDescription);
+            console.log('Parsed legal description:', parsedLegal);
             
             const { error: saveError } = await saveDataToSupabase(assessmentResult.data, parsedLegal);
             if (saveError) {
